@@ -1,7 +1,5 @@
 package org.signal.core.util.crypto
 
-import java.util.Arrays
-
 /**
  * A data class to hold encrypted data along with its Initialization Vector (IV).
  *

@@ -12,11 +12,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowKeyStore
+import org.robolectric.Shadows
 import java.security.KeyStore
+import java.security.cert.Certificate
 import javax.crypto.SecretKey
 import android.security.keystore.StrongBoxUnavailableException
 import org.robolectric.shadows.ShadowLog
 import org.junit.Assert.assertTrue
+import org.mockito.Mockito.mock
 
 
 @RunWith(RobolectricTestRunner::class)
@@ -24,7 +28,6 @@ import org.junit.Assert.assertTrue
 class AndroidKeyGuardianTest {
 
     private lateinit var keyStore: KeyStore
-    private val keyAlias = "com.yourapp.extralock.aeskey"
 
     @Before
     fun setUp() {
@@ -35,16 +38,16 @@ class AndroidKeyGuardianTest {
         keyStore = KeyStore.getInstance("AndroidKeyStore")
         keyStore.load(null) // Initialize
         // Ensure the key from previous tests is cleared
-        if (keyStore.containsAlias(keyAlias)) {
-            keyStore.deleteEntry(keyAlias)
+        if (keyStore.containsAlias(AndroidKeyGuardian.KEY_ALIAS)) {
+            keyStore.deleteEntry(AndroidKeyGuardian.KEY_ALIAS)
         }
     }
 
     @After
     fun tearDown() {
         // Clean up the key from the keystore after each test
-        if (keyStore.containsAlias(keyAlias)) {
-            keyStore.deleteEntry(keyAlias)
+        if (keyStore.containsAlias(AndroidKeyGuardian.KEY_ALIAS)) {
+            keyStore.deleteEntry(AndroidKeyGuardian.KEY_ALIAS)
         }
     }
 
@@ -55,23 +58,11 @@ class AndroidKeyGuardianTest {
         assertEquals("Key algorithm should be AES", KeyProperties.KEY_ALGORITHM_AES, secretKey.algorithm)
 
         // Verify key properties from KeyStore
-        val entry = keyStore.getEntry(keyAlias, null)
+        val entry = keyStore.getEntry(AndroidKeyGuardian.KEY_ALIAS, null)
         assertNotNull("KeyStore entry should not be null", entry)
         assertTrue("Entry should be SecretKeyEntry", entry is KeyStore.SecretKeyEntry)
         val retrievedKey = (entry as KeyStore.SecretKeyEntry).secretKey
         assertEquals("Retrieved key should match generated key", secretKey, retrievedKey)
-
-        // Check some KeyGenParameterSpec properties (requires API M+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val keyInfo = android.security.keystore.KeyInfo.Builder(keyAlias).build()
-            val spec = KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).build()
-            // This is a simplified check. For real KeyInfo, you'd need a KeyFactory
-            // val factory = KeyFactory.getInstance(retrievedKey.algorithm, "AndroidKeyStore")
-            // val keyInfoActual = factory.getKeySpec(retrievedKey, KeyInfo::class.java)
-            // assertEquals(KeyProperties.BLOCK_MODE_GCM, keyInfoActual.blockModes[0])
-            // assertEquals(KeyProperties.ENCRYPTION_PADDING_NONE, keyInfoActual.encryptionPaddings[0])
-            // assertTrue("User authentication should be required", keyInfoActual.isUserAuthenticationRequired)
-        }
     }
 
     @Test
@@ -104,46 +95,28 @@ class AndroidKeyGuardianTest {
         } catch (e: Exception) {
             fail("Should not throw other exceptions when attempting StrongBox: ${e.message}")
         }
-        assertTrue("Key should be present in keystore", keyStore.containsAlias(keyAlias))
+        assertTrue("Key should be present in keystore", keyStore.containsAlias(AndroidKeyGuardian.KEY_ALIAS))
     }
 
     @Test(expected = KeyRetrievalFailedException::class)
     @Config(sdk = [Build.VERSION_CODES.M])
     fun getOrCreateEncryptionKey_aliasExistsButNotSecretKey_throwsKeyRetrievalFailed() {
-        // Manually put a non-SecretKeyEntry into the keystore under the alias (if possible with Robolectric)
-        // This is tricky as KeyStore SPI might prevent this.
-        // Alternative: mock KeyStore.getEntry to return something else.
-        // For now, this test case might be hard to implement perfectly without deeper mocking.
-        // Let's assume a scenario where the alias exists but points to an invalid/unexpected entry type.
-        // The current implementation checks `as? KeyStore.SecretKeyEntry` which would lead to null,
-        // then throwing KeyRetrievalFailedException.
+        // Get the ShadowKeyStore
+        val shadowKeyStore = Shadows.shadowOf(keyStore)
 
-        // Simulate a scenario where the alias exists but it's not a SecretKeyEntry
-        // This requires a more complex setup, possibly mocking KeyStore behavior.
-        // For this example, we'll assume the path in AndroidKeyGuardian that handles
-        // `secretKeyEntry == null` after `keyStore.getEntry` is hit.
+        // Create a dummy certificate to put into a TrustedCertificateEntry
+        // We use Mockito to create a simple mock Certificate object.
+        // The actual content of the certificate doesn't matter for this test,
+        // only its type when wrapped in a KeyStore.Entry.
+        val dummyCertificate = mock(Certificate::class.java)
+        val trustedCertificateEntry = KeyStore.TrustedCertificateEntry(dummyCertificate)
 
-        // A direct way to test this specific path in AndroidKeyGuardian is harder with default Robolectric.
-        // However, if keyStore.getEntry() returned a valid entry that is *not* a SecretKeyEntry,
-        // the `as? KeyStore.SecretKeyEntry` would become null, triggering the desired exception.
-        // Since we can't easily force a non-SecretKeyEntry, this test relies on that internal logic.
+        // Add this non-SecretKeyEntry to the keystore under the target alias
+        shadowKeyStore.addEntry(AndroidKeyGuardian.KEY_ALIAS, trustedCertificateEntry)
 
-        // To actually make keyStore.getEntry return a non-SecretKeyEntry, one might need to:
-        // 1. Use a custom ShadowKeyStore.
-        // 2. Or, if the KeyStore instance itself could be mocked (e.g. with Mockito if not final).
-
-        // For now, we acknowledge this test describes a valid scenario,
-        // but its direct simulation in Robolectric is non-trivial.
-        // The code path is: keyStore.containsAlias(KEY_ALIAS) is true,
-        // keyStore.getEntry(...) returns an Entry that is NOT a SecretKeyEntry.
-        // Then `as? KeyStore.SecretKeyEntry` is null, leading to the exception.
-
-        // This test will likely not trigger the exception as expected without more advanced mocking.
-        // We'll simulate the condition by directly calling the exception to ensure it's defined
-        // and the test framework recognizes it. This is a placeholder.
-        if (true) { // Condition to ensure the exception is reachable by the test runner for discovery
-            throw KeyRetrievalFailedException("Simulated: Alias found but entry is not a SecretKeyEntry.")
-        }
+        // Now, when AndroidKeyGuardian tries to get the key, it will find an entry,
+        // but it won't be a SecretKeyEntry, leading to KeyRetrievalFailedException.
+        AndroidKeyGuardian.getOrCreateEncryptionKey()
     }
 
 
