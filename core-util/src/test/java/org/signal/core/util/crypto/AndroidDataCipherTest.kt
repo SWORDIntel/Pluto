@@ -105,7 +105,7 @@ class AndroidDataCipherTest {
         val encryptedData = AndroidDataCipher.encrypt(originalText, secretKey)
         assertNotNull("EncryptedData should not be null for empty plaintext", encryptedData)
         // Ciphertext for empty string might not be empty due to GCM authentication tag
-        //assertTrue("Ciphertext for empty string should not be empty", encryptedData.ciphertext.isNotEmpty())
+        assertTrue("Ciphertext for empty string should not be empty", encryptedData.ciphertext.isNotEmpty())
         assertNotNull("IV should not be null for empty plaintext", encryptedData.iv)
 
         val decryptedText = AndroidDataCipher.decrypt(encryptedData, secretKey)

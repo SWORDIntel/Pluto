@@ -21,7 +21,7 @@ import android.Manifest // Required for USE_BIOMETRIC constant if used directly
 object AndroidKeyGuardian {
 
     private const val ANDROID_KEYSTORE_PROVIDER = "AndroidKeyStore"
-    private const val KEY_ALIAS = "com.yourapp.extralock.aeskey" // As per requirement
+    internal const val KEY_ALIAS = "org.thoughtcrime.securesms.extralock.aeskey" // As per requirement
     private const val KEY_SIZE = 256 // AES-256
     private const val AUTH_TIMEOUT_SECONDS = 30 // 30 seconds for user authentication validity
     private const val TAG = "AndroidKeyGuardian"
@@ -101,10 +101,7 @@ object AndroidKeyGuardian {
                     throw KeyGenerationFailedException("Failed to generate new key for alias: $KEY_ALIAS", e)
                 }
             }
-        } catch (e: KeyStoreUnavailableException) {
-            throw e
-        }
-        catch (e: Exception) {
+        } catch (e: Exception) {
             throw KeyStoreUnavailableException("Android Keystore is unavailable or failed to load.", e)
         }
     }

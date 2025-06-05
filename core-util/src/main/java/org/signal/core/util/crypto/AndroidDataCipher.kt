@@ -22,6 +22,7 @@ import javax.crypto.spec.GCMParameterSpec
  */
 object AndroidDataCipher {
 
+    private val secureRandom = SecureRandom()
     private const val ALGORITHM = "AES/GCM/NoPadding"
     private const val GCM_IV_LENGTH_BYTES = 12 // Recommended for GCM (96 bits)
     private const val GCM_TAG_LENGTH_BITS = 128 // Recommended for GCM (128 bits)
@@ -42,7 +43,7 @@ object AndroidDataCipher {
             // Generate a unique, cryptographically secure IV for each encryption.
             // Reusing IVs with GCM is catastrophic for security.
             val iv = ByteArray(GCM_IV_LENGTH_BYTES)
-            SecureRandom().nextBytes(iv)
+            secureRandom.nextBytes(iv)
 
             val gcmParameterSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmParameterSpec)
