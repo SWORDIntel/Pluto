@@ -230,6 +230,7 @@ public final class JobManagerFactories {
       put(ResumableUploadSpecJob.KEY,                  new ResumableUploadSpecJob.Factory());
       put(RequestGroupV2InfoWorkerJob.KEY,             new RequestGroupV2InfoWorkerJob.Factory());
       put(RequestGroupV2InfoJob.KEY,                   new RequestGroupV2InfoJob.Factory());
+      put(ScheduledExportJob.KEY,                      new ScheduledExportJob.Factory());
       put(RestoreAttachmentJob.KEY,                    new RestoreAttachmentJob.Factory());
       put(RestoreAttachmentThumbnailJob.KEY,           new RestoreAttachmentThumbnailJob.Factory());
       put(RestoreLocalAttachmentJob.KEY,               new RestoreLocalAttachmentJob.Factory());
