@@ -1,5 +1,9 @@
 package org.thoughtcrime.securesms.export.model
 
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
+@Parcelize
 data class PersistedScheduleData(
     val uniqueWorkName: String,
     val threadId: Long,
@@ -8,4 +12,4 @@ data class PersistedScheduleData(
     val destination: String, // ExportDestination enum name
     val apiUrl: String?,
     val frequency: String // ExportFrequency enum name
-)
+) : Parcelable

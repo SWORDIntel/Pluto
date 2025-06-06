@@ -15,6 +15,7 @@ import org.thoughtcrime.securesms.database.KeyValueDatabase // Added for injecti
 import org.thoughtcrime.securesms.export.jobs.ScheduledChatExportWorker
 import org.thoughtcrime.securesms.export.model.PersistedScheduleData
 import org.thoughtcrime.securesms.export.ui.ExportFrequency
+import org.thoughtcrime.securesms.export.ui.ExportOptions // For the new method parameter
 import java.util.UUID // Keep for now, though uniqueWorkName is deterministic
 import java.util.concurrent.TimeUnit
 
@@ -44,6 +45,7 @@ class ChatExportScheduler(
         apiUrl: String?,
         frequency: ExportFrequency
     ): String {
+        Log.i(TAG, "scheduleExport called. threadId: $threadId, chatName: '$chatName', format: $format, destination: $destination, apiUrl: ${apiUrl ?: "N/A"}, frequency: $frequency")
         // Use injected workManager
         val uniqueWorkName = "scheduled_export_thread_$threadId"
 
@@ -96,10 +98,33 @@ class ChatExportScheduler(
         return uniqueWorkName
     }
 
+    fun scheduleExportFromOptions(
+        threadId: Long,
+        chatName: String,
+        options: ExportOptions
+    ): String? {
+        Log.i(TAG, "scheduleExportFromOptions called. threadId: $threadId, chatName: '$chatName', options: $options")
+        if (options.type != org.thoughtcrime.securesms.export.ui.ExportType.SCHEDULED || options.frequency == null) {
+            Log.w(TAG, "Attempt to schedule non-scheduled type or null frequency. Type: ${options.type}, Freq: ${options.frequency}")
+            return null
+        }
+
+        // Delegate to the existing scheduleExport method
+        return scheduleExport(
+            threadId = threadId,
+            chatName = chatName,
+            format = options.format.name,
+            destination = options.destination.name,
+            apiUrl = options.apiUrl,
+            frequency = options.frequency
+        )
+    }
+
     fun cancelScheduledExport(uniqueWorkName: String) {
+        Log.i(TAG, "Attempting to cancel scheduled export with work name '$uniqueWorkName'")
         this.workManager.cancelUniqueWork(uniqueWorkName)
-        removeScheduleConfiguration(uniqueWorkName)
-        Log.i(TAG, "Cancelled scheduled export with work name '$uniqueWorkName'")
+        removeScheduleConfiguration(uniqueWorkName) // This already logs removal from KVD
+        Log.i(TAG, "Cancellation request processed for work name '$uniqueWorkName'") // WorkManager cancellation is asynchronous
     }
 
     fun cancelAllScheduledExports() {
@@ -144,10 +169,13 @@ class ChatExportScheduler(
     }
 
     fun getAllScheduledExportConfigs(): List<PersistedScheduleData> {
+        Log.d(TAG, "getAllScheduledExportConfigs called.")
         val scheduleIds = getScheduleIds()
-        return scheduleIds.mapNotNull { id ->
+        val configs = scheduleIds.mapNotNull { id ->
             getScheduleConfig(id)
         }
+        Log.d(TAG, "Found ${configs.size} scheduled export configurations.")
+        return configs
     }
 
     private fun getScheduleIds(): Set<String> {

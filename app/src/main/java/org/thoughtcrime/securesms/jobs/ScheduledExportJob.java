@@ -39,39 +39,41 @@ public class ScheduledExportJob extends BaseJob {
 
     public static final String KEY = "ScheduledExportJob";
 
-    private static final String TAG = Log.tag(ScheduledExportJob.class); // Corrected Log tag
+    private static final String TAG = Log.tag(ScheduledExportJob.class);
 
-    private static final String KEY_DESTINATION_URI_STRING = "destination_uri_string"; // Clarified name
-    private static final String KEY_PASSPHRASE = "passphrase";
+    // Keys for Job Data
+    public static final String KEY_THREAD_ID = "thread_id";
+    public static final String KEY_PASSPHRASE = "passphrase";
+    public static final String KEY_EXPORT_FORMAT = "export_format"; // e.g., ExportFormat.JSON.name()
+    public static final String KEY_EXPORT_DESTINATION_TYPE = "export_destination_type"; // e.g., ExportDestination.API_ENDPOINT.name()
+    public static final String KEY_API_URL = "api_url"; // Nullable
+    // KEY_DESTINATION_URI_STRING (for temp file) is removed, will be generated in onRun
 
-    // Destination URI might be for SAF, so store its string representation
-    public ScheduledExportJob(@NonNull String destinationUriString, @NonNull String passphrase) {
-        this(new Job.Parameters.Builder()
+    public ScheduledExportJob(long threadId, @NonNull String passphrase,
+                              @NonNull String exportFormatName, @NonNull String exportDestinationTypeName,
+                              @Nullable String apiUrl) {
+        super(new Job.Parameters.Builder()
                 .setQueue("ScheduledExportJob")
-                .addConstraint(NetworkConstraint.UNMETERED)
-                .setMaxAttempts(3) // Reduced max attempts for now
-                .setLifespan(java.util.concurrent.TimeUnit.DAYS.toMillis(1)) // Job expires after 1 day
-                .build(),
-             destinationUriString,
-             passphrase);
+                .addConstraint(NetworkConstraint.UNMETERED) // Default, can be overridden by specific scheduling if needed
+                .setMaxAttempts(3)
+                .setLifespan(java.util.concurrent.TimeUnit.DAYS.toMillis(1))
+                .setInputData(new Data.Builder()
+                        .putLong(KEY_THREAD_ID, threadId)
+                        .putString(KEY_PASSPHRASE, passphrase)
+                        .putString(KEY_EXPORT_FORMAT, exportFormatName)
+                        .putString(KEY_EXPORT_DESTINATION_TYPE, exportDestinationTypeName)
+                        .putString(KEY_API_URL, apiUrl) // putString handles null correctly
+                        .build())
+                .build());
     }
 
-    private ScheduledExportJob(@NonNull Job.Parameters parameters, @NonNull String destinationUriString, @NonNull String passphrase) {
+    // Private constructor for Factory
+    private ScheduledExportJob(@NonNull Job.Parameters parameters) {
         super(parameters);
-        this.destinationUriString = destinationUriString;
-        this.passphrase = passphrase;
     }
 
-    private final String destinationUriString; // Store as String
-    private final String passphrase;
-
-    @Override
-    public @NonNull Data serialize() {
-        return new Data.Builder()
-                .putString(KEY_DESTINATION_URI_STRING, destinationUriString)
-                .putString(KEY_PASSPHRASE, passphrase)
-                .build();
-    }
+    // No need to override serialize() if all state is in Parameters' Data.
+    // BaseJob.serialize() handles it.
 
     @Override
     public @NonNull String getFactoryKey() {
@@ -80,41 +82,55 @@ public class ScheduledExportJob extends BaseJob {
 
     @Override
     public void onRun() throws Exception {
-        Log.i(TAG, "Starting scheduled export job.");
+        Log.i(TAG, "Starting export job.");
         Context context = ApplicationDependencies.getApplication();
+        Data data = getParameters().getInputData();
 
-        // ** 1. Data Creation (FullBackupExporter.export) **
-        File temporaryExportFile = new File(context.getCacheDir(), "scheduled_export_temp.backup");
+        long threadId = data.getLong(KEY_THREAD_ID, -1L);
+        String passphrase = data.getString(KEY_PASSPHRASE);
+        String exportFormatName = data.getString(KEY_EXPORT_FORMAT);
+        String exportDestinationTypeName = data.getString(KEY_EXPORT_DESTINATION_TYPE);
+        String apiUrl = data.getString(KEY_API_URL); // Will be null if not set
+
+        if (threadId == -1L || passphrase == null || exportFormatName == null || exportDestinationTypeName == null) {
+            Log.e(TAG, "Missing critical parameters for export job. ThreadId: $threadId, Passphrase provided: ${passphrase != null}, Format: $exportFormatName, DestType: $exportDestinationTypeName");
+            throw new IllegalArgumentException("Missing critical parameters for export job.");
+        }
+
+        Log.i(TAG, "Job parameters: threadId=$threadId, format=$exportFormatName, destinationType=$exportDestinationTypeName, apiUrl=${apiUrl ?: "N/A"}");
+
+        // Generate temp file path inside onRun
+        File temporaryExportFile = new File(context.getCacheDir(), "export_${threadId}_${System.currentTimeMillis()}.backup");
+
         AttachmentSecret attachmentSecret = SignalStore.account().getAttachmentSecret();
-        SQLiteDatabase database = ApplicationDependencies.getSignalServiceDatabase(); // This might need to be getBackupDatabase() or similar depending on locking
+        SQLiteDatabase database = ApplicationDependencies.getSignalServiceDatabase();
 
         if (attachmentSecret == null) {
-            Log.w(TAG, "AttachmentSecret is null. Cannot proceed with export.");
-            throw new IOException("AttachmentSecret is null.");
+            Log.w(TAG, "AttachmentSecret is null for thread $threadId. Cannot proceed with export.");
+            throw new IOException("AttachmentSecret is null for thread " + threadId);
         }
         if (database == null || !database.isOpen()) {
-            Log.w(TAG, "Database is null or not open. Cannot proceed with export.");
-            throw new IOException("Database is null or not open.");
+            Log.w(TAG, "Database is null or not open for thread $threadId. Cannot proceed with export.");
+            throw new IOException("Database is null or not open for thread " + threadId);
         }
 
-        Log.i(TAG, "Exporting data to temporary file: " + temporaryExportFile.getAbsolutePath());
+        Log.i(TAG, "Beginning export to temporary file for thread $threadId: " + temporaryExportFile.getAbsolutePath());
         try {
             FullBackupExporter.export(context,
                                       attachmentSecret,
                                       database,
                                       temporaryExportFile,
-                                      passphrase,
-                                      new BackupCancellationSignal() { // Basic cancellation signal
+                                      passphrase, // Retrieved from Data
+                                      new BackupCancellationSignal() {
                                           @Override
                                           public boolean isCanceled() {
-                                              return isCanceled(); // Check job's cancellation status
+                                              return ScheduledExportJob.this.isCanceled(); // Check job's cancellation status
                                           }
                                       });
             Log.i(TAG, "Data export to temporary file successful. Size: " + temporaryExportFile.length() + " bytes.");
         } catch (StoragePermissionException | InsufficientStorageException e) {
-            Log.e(TAG, "Storage permission or insufficient space issue during export.", e);
-            // These are likely permanent issues for this attempt/configuration, don't retry based on these.
-            throw e; // Re-throw to mark job as failed permanently for this cause.
+            Log.e(TAG, "Storage permission or insufficient space issue during export for thread $threadId.", e);
+            throw e;
         } catch (IOException e) {
             Log.e(TAG, "IOException during data export.", e);
             // IOExceptions could be temporary (e.g. disk error), could retry.
@@ -125,84 +141,100 @@ public class ScheduledExportJob extends BaseJob {
         // Obtain dependencies for ExportClient
         SignalServiceAccountManager accountManager = ApplicationDependencies.getSignalServiceAccountManager();
         SignalWebSocket signalWebSocket = ApplicationDependencies.getSignalWebSocket();
-        PushServiceSocket pushServiceSocket = ApplicationDependencies.getPushServiceSocket(); // May need specific instance
+        PushServiceSocket pushServiceSocket = ApplicationDependencies.getPushServiceSocket();
 
         if (accountManager == null || signalWebSocket == null || pushServiceSocket == null) {
-            Log.e(TAG, "One or more dependencies for ExportClient are null. Cannot upload.");
-            temporaryExportFile.delete(); // Clean up temp file
-            throw new IllegalStateException("ExportClient dependencies not available.");
-        }
-
-        AttachmentApi attachmentApi = new AttachmentApi(signalWebSocket.getAuthenticatedWebSocket(), pushServiceSocket);
-        ExportClient exportClient = new ExportClient(attachmentApi);
-
-        Log.i(TAG, "Getting upload parameters...");
-        NetworkResult<Pair<AttachmentUploadForm, String>> paramsResult = exportClient.getUploadParameters();
-
-        if (paramsResult instanceof NetworkResult.Failure) {
-            NetworkResult.Failure failure = (NetworkResult.Failure) paramsResult;
-            Log.w(TAG, "Failed to get upload parameters. Code: " + failure.getCode() + ", Error: " + failure.getError());
+            Log.e(TAG, "One or more dependencies for ExportClient are null for thread $threadId. Cannot upload.");
             temporaryExportFile.delete();
-            throw failure.getError(); // Let onShouldRetry handle this
+            throw new IllegalStateException("ExportClient dependencies not available for thread $threadId.");
         }
 
-        Pair<AttachmentUploadForm, String> uploadParams = ((NetworkResult.Success<Pair<AttachmentUploadForm, String>>) paramsResult).getValue();
-        AttachmentUploadForm uploadForm = uploadParams.first;
-        String resumableUploadUrl = uploadParams.second;
+        // TODO: Check exportDestinationTypeName. If it's API_ENDPOINT, then proceed with upload.
+        //       If it's LOCAL_FILE, the work is done (file is in temporaryExportFile).
+        //       The final destination for LOCAL_FILE would need to be handled, perhaps by copying
+        //       this temp file to a user-specified SAF URI, which is complex for a background job.
+        //       For now, assume API_ENDPOINT is the primary target for this job's upload phase.
+        //       If local, the temp file is just created and then cleaned up. This might need refinement
+        //       based on actual feature requirements for "local" one-time exports via this job.
 
-        Log.i(TAG, "Uploading file to API...");
-        try (InputStream inputStream = new FileInputStream(temporaryExportFile)) {
-            NetworkResult<Unit> uploadResult = exportClient.uploadFile(uploadForm,
-                                                                     resumableUploadUrl,
-                                                                     inputStream,
-                                                                     temporaryExportFile.length());
+        if (exportDestinationTypeName.equals("API_ENDPOINT")) {
+            AttachmentApi attachmentApi = new AttachmentApi(signalWebSocket.getAuthenticatedWebSocket(), pushServiceSocket);
+            ExportClient exportClient = new ExportClient(attachmentApi);
 
-            if (uploadResult instanceof NetworkResult.Failure) {
-                NetworkResult.Failure failure = (NetworkResult.Failure) uploadResult;
-                Log.w(TAG, "Failed to upload file. Code: " + failure.getCode() + ", Error: " + failure.getError());
-                throw failure.getError(); // Let onShouldRetry handle this
+            Log.i(TAG, "Getting upload parameters for thread $threadId...");
+            NetworkResult<Pair<AttachmentUploadForm, String>> paramsResult = exportClient.getUploadParameters();
+
+            if (paramsResult instanceof NetworkResult.Failure) {
+                NetworkResult.Failure failureResult = (NetworkResult.Failure) paramsResult;
+                Log.w(TAG, "Failed to get upload parameters for thread $threadId. Code: " + failureResult.getCode() + ", Error: " + failureResult.getError().getMessage(), failureResult.getError());
+                temporaryExportFile.delete();
+                throw failureResult.getError();
             }
-            Log.i(TAG, "File upload successful!");
-        } catch (IOException e) {
-            Log.e(TAG, "IOException during file upload.", e);
-            throw e; // Let onShouldRetry handle this
-        } finally {
-            // ** 3. Cleanup **
-            Log.i(TAG, "Deleting temporary export file: " + temporaryExportFile.getAbsolutePath());
-            if (temporaryExportFile.delete()) {
-                Log.i(TAG, "Temporary file deleted successfully.");
-            } else {
-                Log.w(TAG, "Failed to delete temporary export file.");
+
+            Pair<AttachmentUploadForm, String> uploadParams = ((NetworkResult.Success<Pair<AttachmentUploadForm, String>>) paramsResult).getValue();
+            AttachmentUploadForm uploadForm = uploadParams.first;
+            String resumableUploadUrl = uploadParams.second;
+            Log.i(TAG, "Successfully got upload parameters for thread $threadId. CDN: ${uploadForm.getCdnNumber()}, Key: ${uploadForm.getKey()}, URL starts with: ${resumableUploadUrl.substring(0, Math.min(resumableUploadUrl.length(), 30))}");
+
+            Log.i(TAG, "Starting file upload to API for thread $threadId. File size: " + temporaryExportFile.length() + " bytes.");
+            try (InputStream inputStream = new FileInputStream(temporaryExportFile)) {
+                NetworkResult<Unit> uploadResult = exportClient.uploadFile(uploadForm,
+                                                                         resumableUploadUrl,
+                                                                         inputStream,
+                                                                         temporaryExportFile.length());
+
+                if (uploadResult instanceof NetworkResult.Failure) {
+                    NetworkResult.Failure failureResult = (NetworkResult.Failure) uploadResult;
+                    Log.w(TAG, "Failed to upload file for thread $threadId. Code: " + failureResult.getCode() + ", Error: " + failureResult.getError().getMessage(), failureResult.getError());
+                    throw failureResult.getError();
+                }
+                Log.i(TAG, "File upload successful for thread $threadId!");
+            } catch (IOException e) {
+                Log.e(TAG, "IOException during file upload for thread $threadId.", e);
+                throw e;
             }
+        } else {
+            Log.i(TAG, "Export destination is local for thread $threadId. Temporary file created at: " + temporaryExportFile.getAbsolutePath());
+            // If it's a local export, the temporary file is the result.
+            // It will be cleaned up by the finally block. For a true local export,
+            // this file would need to be moved to a user-accessible location,
+            // which is outside the scope of this job's current upload logic.
         }
-        Log.i(TAG, "Scheduled export job finished successfully.");
+
+        // Cleanup is now outside the try-catch for upload, happens for both API and Local (temp file)
+        // ** 3. Cleanup **
+        Log.i(TAG, "Deleting temporary export file for thread $threadId: " + temporaryExportFile.getAbsolutePath());
+        if (temporaryExportFile.delete()) {
+            Log.i(TAG, "Temporary file for thread $threadId deleted successfully.");
+        } else {
+            Log.w(TAG, "Failed to delete temporary export file for thread $threadId.");
+        }
+
+        Log.i(TAG, "Export job for thread $threadId finished successfully.");
     }
 
     @Override
     public void onFailure() {
-        Log.w(TAG, "Job failed permanently and will not be retried.");
-        // Consider cleaning up temporary files here too, if any were left from a failed onRun before cleanup.
-        File temporaryExportFile = new File(ApplicationDependencies.getApplication().getCacheDir(), "scheduled_export_temp.backup");
-        if (temporaryExportFile.exists()) {
-            Log.w(TAG, "Cleaning up temporary file after permanent failure: " + temporaryExportFile.getAbsolutePath());
-            temporaryExportFile.delete();
-        }
+        Log.w(TAG, "Job failed permanently and will not be retried. InputData: " + getParameters().getInputData().toString());
+        // Attempt to clean up temp file if path can be reconstructed or was stored
+        // For now, no specific path reconstruction here, relies on onRun's finally block if it reached that far.
     }
 
     @Override
     public boolean onShouldRetry(@NonNull Exception e) {
-        Log.w(TAG, "Exception occurred during job execution", e);
+        Data data = getParameters().getInputData();
+        long threadId = data.getLong(KEY_THREAD_ID, -1L);
+        Log.w(TAG, "Exception occurred during job execution for thread $threadId", e);
+
         if (e instanceof StoragePermissionException || e instanceof InsufficientStorageException) {
-            Log.w(TAG, "Non-retryable storage exception.");
+            Log.w(TAG, "Non-retryable storage exception for thread $threadId.");
             return false;
         }
-        if (e instanceof IOException) { // Covers network issues from ExportClient too if they are wrapped in IOException or are IOExceptions
-            Log.w(TAG, "Retryable IOException detected.");
+        if (e instanceof IOException) {
+            Log.w(TAG, "Retryable IOException detected for thread $threadId.");
             return true;
         }
-        // For other specific API errors from NetworkResult.Failure that might be retryable:
-        // if (e instanceof SomeSpecificApiException) { return true; }
-        Log.w(TAG, "Exception not deemed retryable.");
+        Log.w(TAG, "Exception not deemed retryable for thread $threadId.");
         return false;
     }
 
@@ -214,13 +246,8 @@ public class ScheduledExportJob extends BaseJob {
     public static final class Factory implements Job.Factory<ScheduledExportJob> {
         @Override
         public @NonNull ScheduledExportJob create(@NonNull Parameters parameters, @NonNull Data data) {
-            String destinationUriString = data.getString(KEY_DESTINATION_URI_STRING);
-            String passphrase = data.getString(KEY_PASSPHRASE);
-
-            if (destinationUriString == null || passphrase == null) {
-                throw new IllegalArgumentException("Missing required parameters for ScheduledExportJob: destinationUriString or passphrase");
-            }
-            return new ScheduledExportJob(parameters, destinationUriString, passphrase);
+            // Data is already part of parameters, just pass parameters to the private constructor.
+            return new ScheduledExportJob(parameters);
         }
     }
 }

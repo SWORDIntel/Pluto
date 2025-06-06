@@ -12,6 +12,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.setPadding
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.viewModels // For by viewModels()
+import androidx.lifecycle.Observer // For LiveData Observer
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 // import org.thoughtcrime.securesms.R // Conceptual R file: Assume R.layout.fragment_manage_scheduled_exports and R.layout.list_item_scheduled_export exist
@@ -23,8 +25,31 @@ class ManageScheduledExportsFragment : Fragment() {
 
     private lateinit var recyclerView: RecyclerView
     private lateinit var noSchedulesTextView: TextView
-    private lateinit var scheduler: ChatExportScheduler
+    // private lateinit var scheduler: ChatExportScheduler // Will be replaced by ViewModel
     private lateinit var scheduledExportsAdapter: ScheduledExportsAdapter
+    private var testSchedules: List<PersistedScheduleData>? = null // To store test data
+
+    private val viewModel: ManageScheduledExportsViewModel by viewModels()
+
+    companion object {
+        private const val ARG_TEST_SCHEDULES = "arg_test_schedules"
+
+        fun newInstanceForTesting(testSchedules: List<PersistedScheduleData>): ManageScheduledExportsFragment {
+            val fragment = ManageScheduledExportsFragment()
+            val args = Bundle()
+            // Ensure PersistedScheduleData is Parcelable (done in previous step)
+            args.putParcelableArrayList(ARG_TEST_SCHEDULES, ArrayList(testSchedules))
+            fragment.arguments = args
+            return fragment
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        arguments?.getParcelableArrayList<PersistedScheduleData>(ARG_TEST_SCHEDULES)?.let {
+            testSchedules = it
+        }
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -41,12 +66,13 @@ class ManageScheduledExportsFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        scheduler = ChatExportScheduler(requireContext().applicationContext)
+        // scheduler = ChatExportScheduler(requireContext().applicationContext) // Replaced by ViewModel
 
         scheduledExportsAdapter = ScheduledExportsAdapter { schedule ->
-            scheduler.cancelScheduledExport(schedule.uniqueWorkName)
-            Toast.makeText(requireContext(), "Cancelled schedule for ${schedule.chatName}", Toast.LENGTH_SHORT).show()
-            loadScheduledExports() // Refresh list
+            // Call ViewModel to cancel
+            viewModel.cancelScheduledExport(requireContext(), schedule.uniqueWorkName)
+            Toast.makeText(requireContext(), "Cancellation requested for ${schedule.chatName}", Toast.LENGTH_SHORT).show()
+            // The list will auto-update via LiveData observation after cancellation and refresh in ViewModel
         }
 
         recyclerView.apply {
@@ -58,7 +84,18 @@ class ManageScheduledExportsFragment : Fragment() {
     }
 
     private fun loadScheduledExports() {
-        val schedules = scheduler.getAllScheduledExportConfigs()
+        if (testSchedules != null) {
+            // If test data is provided, use it directly
+            updateAdapterWithSchedules(testSchedules!!)
+        } else {
+            // Otherwise, observe LiveData from ViewModel
+            viewModel.getScheduledExports(requireContext()).observe(viewLifecycleOwner, Observer { schedules ->
+                updateAdapterWithSchedules(schedules)
+            })
+        }
+    }
+
+    private fun updateAdapterWithSchedules(schedules: List<PersistedScheduleData>) {
         if (schedules.isEmpty()) {
             recyclerView.visibility = View.GONE
             noSchedulesTextView.visibility = View.VISIBLE
