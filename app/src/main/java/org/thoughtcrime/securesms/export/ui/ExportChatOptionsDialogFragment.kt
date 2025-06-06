@@ -3,6 +3,7 @@ package org.thoughtcrime.securesms.export.ui
 import android.app.Dialog
 import android.content.Context
 import android.os.Bundle
+import android.os.Parcelable
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.ArrayAdapter
@@ -12,27 +13,36 @@ import android.widget.Spinner
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import androidx.fragment.app.viewModels // For by viewModels()
 import com.google.android.material.textfield.TextInputLayout
 import com.google.android.material.textfield.TextInputEditText
 import org.thoughtcrime.securesms.R // Assuming this is the correct R file import
+
+// Listener interface for dialog actions
+import kotlinx.parcelize.Parcelize
 
 // Listener interface for dialog actions
 interface ExportOptionsListener {
     fun onExportSelected(options: ExportOptions, threadId: Long)
 }
 
+@Parcelize
 data class ExportOptions(
     val format: ExportFormat,
     val destination: ExportDestination,
     val apiUrl: String?,
     val type: ExportType,
     val frequency: ExportFrequency?
-)
+) : Parcelable
 
-enum class ExportFormat { JSON, CSV }
-enum class ExportDestination { LOCAL_FILE, API_ENDPOINT }
-enum class ExportType { ONETIME, SCHEDULED }
-enum class ExportFrequency { DAILY, WEEKLY, MONTHLY } // Matches conceptual string-array
+@Parcelize
+enum class ExportFormat : Parcelable { JSON, CSV }
+@Parcelize
+enum class ExportDestination : Parcelable { LOCAL_FILE, API_ENDPOINT }
+@Parcelize
+enum class ExportType : Parcelable { ONETIME, SCHEDULED }
+@Parcelize
+enum class ExportFrequency : Parcelable { DAILY, WEEKLY, MONTHLY } // Matches conceptual string-array
 
 class ExportChatOptionsDialogFragment : DialogFragment() {
 
@@ -46,13 +56,16 @@ class ExportChatOptionsDialogFragment : DialogFragment() {
     private lateinit var cancelButton: Button
     private lateinit var exportButton: Button
 
-    // It's generally safer to get the listener in onAttach or check in onResume
+    private val exportViewModel: ExportViewModel by viewModels() // ViewModel instance
+
+    // Listener interface might become obsolete or change if all actions are via ViewModel
     var listener: ExportOptionsListener? = null
     private var threadId: Long = -1L
 
     companion object {
         const val TAG = "ExportChatOptionsDialog"
         private const val ARG_THREAD_ID = "thread_id"
+        private const val ARG_TEST_OPTIONS = "test_options" // Key for test options
 
         fun newInstance(threadId: Long): ExportChatOptionsDialogFragment {
             val fragment = ExportChatOptionsDialogFragment()
@@ -61,20 +74,25 @@ class ExportChatOptionsDialogFragment : DialogFragment() {
             fragment.arguments = args
             return fragment
         }
+
+        fun newInstanceForTesting(threadId: Long, testOptions: ExportOptions): ExportChatOptionsDialogFragment {
+            val fragment = ExportChatOptionsDialogFragment()
+            val args = Bundle()
+            args.putLong(ARG_THREAD_ID, threadId)
+            args.putParcelable(ARG_TEST_OPTIONS, testOptions)
+            fragment.arguments = args
+            return fragment
+        }
     }
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
-        // Set listener from context or parent fragment
+        // Set listener from context or parent fragment - this might be removed if ViewModel handles all
         listener = when {
             context is ExportOptionsListener -> context
             parentFragment is ExportOptionsListener -> parentFragment as ExportOptionsListener
-            targetFragment is ExportOptionsListener -> targetFragment as ExportOptionsListener // For older setTargetFragment pattern
+            targetFragment is ExportOptionsListener -> targetFragment as ExportOptionsListener
             else -> null
-        }
-        if (listener == null) {
-            // Optional: Log a warning or throw an exception if the listener is crucial
-            // Log.w(TAG, "ExportOptionsListener not implemented by host.")
         }
     }
 
@@ -84,7 +102,20 @@ class ExportChatOptionsDialogFragment : DialogFragment() {
     }
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-        val builder = AlertDialog.Builder(requireContext()) // Use requireContext() for non-null context
+        val testOptions: ExportOptions? = arguments?.getParcelable(ARG_TEST_OPTIONS)
+        if (testOptions != null) {
+            // In test mode, directly use the ViewModel.
+            // The listener from onAttach might not be relevant if the dialog is dismissed quickly.
+            if (threadId != -1L) {
+                exportViewModel.startExportOrSchedule(requireContext(), threadId, testOptions)
+                // Return an empty dialog that will be dismissed in onStart
+                return AlertDialog.Builder(requireContext()).create()
+            } else {
+                Toast.makeText(requireContext(), "Test mode error: ThreadID missing.", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        val builder = AlertDialog.Builder(requireContext())
         val inflater = LayoutInflater.from(requireContext())
 
         // Conceptual R.layout.dialog_export_chat_options, assuming it exists and matches the XML described in Plan Step 6
@@ -164,20 +195,34 @@ class ExportChatOptionsDialogFragment : DialogFragment() {
                  return@setOnClickListener
             }
 
-            listener?.onExportSelected(
+            // Call the ViewModel instead of the listener directly
+            exportViewModel.startExportOrSchedule(
+                requireContext(),
+                threadId,
                 ExportOptions(
                     format = selectedFormat,
                     destination = selectedDestination,
                     apiUrl = if (selectedDestination == ExportDestination.API_ENDPOINT) apiUrlText else null,
                     type = selectedType,
                     frequency = selectedFrequency
-                ),
-                threadId
+                )
             )
             dismiss()
         }
 
         return builder.create()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // If this dialog was created with test options, it should be dismissed.
+        // The listener callback happens in onCreateDialog, and an empty dialog is returned.
+        // This ensures that empty dialog is dismissed.
+        if (arguments?.containsKey(ARG_TEST_OPTIONS) == true) {
+            if (dialog?.isShowing == true) {
+                dismissAllowingStateLoss()
+            }
+        }
     }
 
     override fun onDetach() {

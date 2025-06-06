@@ -204,11 +204,13 @@ public class FullBackupExporter extends FullBackupBase {
                                             @NonNull BackupCancellationSignal cancellationSignal)
       throws IOException
   {
+    Log.i(TAG, "internalExport started. Passphrase " + (TextUtils.isEmpty(passphrase) ? "not " : "") + "provided. Output stream will be " + (closeOutputStream ? "closed." : "left open."));
     BackupFrameOutputStream outputStream          = new BackupFrameOutputStream(fileOutputStream, passphrase);
     int                     count                 = 0;
     long                    estimatedCountOutside;
 
     try {
+      Log.d(TAG, "Writing database version: " + input.getVersion());
       outputStream.writeDatabaseVersion(input.getVersion());
       count++;
 
@@ -236,10 +238,15 @@ public class FullBackupExporter extends FullBackupBase {
           count = exportTable(table, input, outputStream, cursor -> true, (cursor, innerCount) -> exportSticker(attachmentSecret, cursor, outputStream, innerCount, estimatedCount), count, estimatedCount, cancellationSignal);
         } else if (!TABLE_CONTENT_BLOCKLIST.contains(table)) {
           count = exportTable(table, input, outputStream, null, null, count, estimatedCount, cancellationSignal);
+        } else {
+          Log.d(TAG, "Skipping content export for table in blocklist: " + table);
+          // Schema is already exported. This else block handles the case where content is skipped.
+          // No 'count' increment needed here beyond what exportSchema might imply for schema.
         }
         stopwatch.split("table::" + table);
       }
 
+      Log.d(TAG, "Exporting shared preferences.");
       for (SharedPreference preference : TextSecurePreferences.getPreferencesToSaveToBackup(context)) {
         throwIfCanceled(cancellationSignal);
         EventBus.getDefault().post(new BackupEvent(BackupEvent.Type.PROGRESS, ++count, estimatedCount));
@@ -248,13 +255,16 @@ public class FullBackupExporter extends FullBackupBase {
 
       stopwatch.split("prefs");
 
+      Log.d(TAG, "Exporting key-value store items.");
       count = exportKeyValues(outputStream, SignalStore.getKeysToIncludeInBackup(), count, estimatedCount, cancellationSignal);
 
       stopwatch.split("key_values");
 
+      Log.d(TAG, "Exporting avatars.");
       for (AvatarHelper.Avatar avatar : AvatarHelper.getAvatars(context)) {
         throwIfCanceled(cancellationSignal);
         if (avatar != null) {
+          Log.d(TAG, "Exporting avatar: " + avatar.getFilename());
           EventBus.getDefault().post(new BackupEvent(BackupEvent.Type.PROGRESS, ++count, estimatedCount));
           try (InputStream inputStream = avatar.getInputStream()) {
             outputStream.write(avatar.getFilename(), inputStream, avatar.getLength());
@@ -265,30 +275,38 @@ public class FullBackupExporter extends FullBackupBase {
       stopwatch.split("avatars");
       stopwatch.stop(TAG);
 
+      Log.i(TAG, "Finalizing backup stream.");
       outputStream.writeEnd();
     } finally {
       if (closeOutputStream) {
+        Log.d(TAG, "Closing output stream.");
         outputStream.close();
       }
     }
+    Log.i(TAG, "internalExport finished. Frames written: " + outputStream.getFrames() + ", Estimated records: " + estimatedCountOutside);
     return new BackupEvent(BackupEvent.Type.FINISHED, outputStream.getFrames(), estimatedCountOutside);
   }
 
   private static long calculateCount(@NonNull Context context, @NonNull SQLiteDatabase input, List<String> tables) {
+    Log.d(TAG, "Calculating estimated record count for backup progress.");
     long count = DATABASE_VERSION_RECORD_COUNT + TABLE_RECORD_COUNT_MULTIPLIER * tables.size();
 
     for (String table : tables) {
+      long tableCount = 0;
       if (table.equals(MessageTable.TABLE_NAME)) {
-        count += getCount(input, BackupCountQueries.mmsCount);
+        tableCount = getCount(input, BackupCountQueries.mmsCount);
       } else if (table.equals(GroupReceiptTable.TABLE_NAME)) {
-        count += getCount(input, BackupCountQueries.getGroupReceiptCount());
+        tableCount = getCount(input, BackupCountQueries.getGroupReceiptCount());
       } else if (table.equals(AttachmentTable.TABLE_NAME)) {
-        count += getCount(input, BackupCountQueries.getAttachmentCount());
+        tableCount = getCount(input, BackupCountQueries.getAttachmentCount());
       } else if (table.equals(StickerTable.TABLE_NAME)) {
-        count += getCount(input, "SELECT COUNT(*) FROM " + table);
+        tableCount = getCount(input, "SELECT COUNT(*) FROM " + table);
       } else if (!TABLE_CONTENT_BLOCKLIST.contains(table)) {
-        count += getCount(input, "SELECT COUNT(*) FROM " + table);
+        tableCount = getCount(input, "SELECT COUNT(*) FROM " + table);
       }
+      // No count increment if table is in blocklist (schema only)
+      count += tableCount;
+      Log.v(TAG, "Table: " + table + ", Estimated records: " + tableCount);
     }
 
     count += IDENTITY_KEY_BACKUP_RECORD_COUNT;
