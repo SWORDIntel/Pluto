@@ -50,6 +50,11 @@ import org.thoughtcrime.securesms.keyvalue.SignalStore;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build; // Added missing import
+import androidx.core.content.ContextCompat;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -103,22 +108,78 @@ public class FullBackupExporter extends FullBackupBase {
                             @NonNull File output,
                             @NonNull String passphrase,
                             @NonNull BackupCancellationSignal cancellationSignal)
-      throws IOException
+      throws IOException, StoragePermissionException, InsufficientStorageException
   {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+        throw new StoragePermissionException("WRITE_EXTERNAL_STORAGE permission not granted.");
+      }
+    }
+
+    // It's good practice to check if the output file's parent directory exists and can be written to.
+    File parentDirectory = output.getParentFile();
+    if (parentDirectory != null) {
+      if (!parentDirectory.exists()) {
+        if (!parentDirectory.mkdirs()) {
+          Log.w(TAG, "Failed to create parent directory: " + parentDirectory.getAbsolutePath() + ". Backup may fail.");
+          // Not throwing immediately, as FileOutputStream will fail if this is critical.
+        }
+      }
+      try {
+        StatFs stat = new StatFs(parentDirectory.getPath());
+        long availableBytes = stat.getAvailableBytes();
+
+        long dbFileSizeBytes = 0;
+        String dbPath = input.getPath();
+        if (dbPath != null) {
+          File dbFile = new File(dbPath);
+          if (dbFile.exists()) {
+            dbFileSizeBytes = dbFile.length();
+          }
+        }
+        // Estimate: 2x current DB size + 100MB buffer. Ensure a minimum of 200MB if DB is very small.
+        long estimatedRequiredBytes = Math.max(dbFileSizeBytes * 2L + 100L * 1024 * 1024, 200L * 1024 * 1024);
+
+        Log.i(TAG, "Available space in " + parentDirectory.getAbsolutePath() + ": " + availableBytes / (1024 * 1024) + "MB. DB size: " + dbFileSizeBytes / (1024*1024) + "MB. Estimated required: " + estimatedRequiredBytes / (1024 * 1024) + "MB.");
+
+        if (availableBytes < estimatedRequiredBytes) {
+          throw new InsufficientStorageException("Insufficient storage space on " + parentDirectory.getAbsolutePath() + ". Available: " + availableBytes + " bytes, Estimated required: " + estimatedRequiredBytes + " bytes.");
+        }
+      } catch (IllegalArgumentException e) {
+        // This can happen if the path is invalid for StatFs (e.g. some virtual filesystems).
+        Log.w(TAG, "Could not determine available storage space for " + parentDirectory.getAbsolutePath() + " due to invalid path. Error: " + e.getMessage());
+        // Not re-throwing as InsufficientStorageException, as we couldn't verify. Write will fail if it's an issue.
+      }
+    } else {
+      Log.w(TAG, "Could not determine parent directory for output file: " + output.getAbsolutePath() + ". Cannot check storage space proactively.");
+    }
+
+    if (output.exists()) {
+      Log.w(TAG, "Output file already exists and will be overwritten: " + output.getAbsolutePath());
+    }
+
     try (OutputStream outputStream = new FileOutputStream(output)) {
       return internalExport(context, attachmentSecret, input, outputStream, passphrase, true, cancellationSignal);
     }
   }
 
-  @RequiresApi(29)
+  @RequiresApi(Build.VERSION_CODES.Q) // Ensure this is Q or higher, matching DocumentFile usage
   public static BackupEvent export(@NonNull Context context,
                             @NonNull AttachmentSecret attachmentSecret,
                             @NonNull SQLiteDatabase input,
                             @NonNull DocumentFile output,
                             @NonNull String passphrase,
                             @NonNull BackupCancellationSignal cancellationSignal)
-      throws IOException
+      throws IOException // Not throwing InsufficientStorageException proactively for SAF
   {
+    if (!output.canWrite()) {
+      throw new IOException("Output DocumentFile is not writable: " + output.getUri());
+    }
+
+    // Proactive free space check for DocumentFile (SAF) is unreliable.
+    // Relying on ContentResolver to throw IOException during write if space is insufficient.
+    Log.i(TAG, "For DocumentFile export (URI: " + output.getUri() + "), proactive free space check is not performed due to SAF limitations. The system will handle low space errors during the write operation.");
+
     try (OutputStream outputStream = Objects.requireNonNull(context.getContentResolver().openOutputStream(output.getUri()))) {
       return internalExport(context, attachmentSecret, input, outputStream, passphrase, true, cancellationSignal);
     }
